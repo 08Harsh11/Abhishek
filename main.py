@@ -93,7 +93,10 @@ def effective_config(overrides: list[str] | None = None) -> dict[str, Any]:
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://dash-cooukr.example.com"],
+    allow_origins=[
+        "https://dash-cooukr.example.com",
+        "https://exam.sanand.workers.dev",
+    ],
     allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
 )
