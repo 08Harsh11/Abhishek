@@ -1,10 +1,13 @@
 import os
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -77,12 +80,46 @@ def effective_config(overrides: list[str] | None = None) -> dict[str, Any]:
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://dash-cooukr.example.com"],
     allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
 )
 
 
+@app.middleware("http")
+async def add_request_headers(request, call_next):
+    started = time.perf_counter()
+    request_id = str(uuid.uuid4())
+    try:
+        response = await call_next(request)
+    except Exception:
+        # Keep the required headers on unexpected server-error responses too.
+        response = JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Process-Time"] = f"{max(0.0, time.perf_counter() - started):.6f}"
+    return response
+
+
 @app.get("/effective-config")
 def get_effective_config(set: list[str] | None = Query(default=None)) -> dict[str, Any]:
     return effective_config(set)
+
+
+@app.get("/stats")
+def get_stats(values: str = Query(...)) -> dict[str, Any]:
+    try:
+        numbers = [int(part.strip()) for part in values.split(",")]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="values must be comma-separated integers") from exc
+    if not numbers:
+        raise HTTPException(status_code=422, detail="values must contain at least one integer")
+    count = len(numbers)
+    total = sum(numbers)
+    return {
+        "email": "24f3002908@ds.study.iitm.ac.in",
+        "count": count,
+        "sum": total,
+        "min": min(numbers),
+        "max": max(numbers),
+        "mean": total / count,
+    }
