@@ -1,18 +1,22 @@
 import os
 import secrets
+import json
+import threading
 import time
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import jwt
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 import redis.asyncio as redis
 import yaml
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -31,6 +35,10 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 ANALYTICS_API_KEY = os.getenv("ANALYTICS_API_KEY", "")
 USER_EMAIL = "24f3002908@ds.study.iitm.ac.in"
+STARTED_AT = time.monotonic()
+REQUEST_COUNTER = Counter("http_requests_total", "Total HTTP requests handled")
+LOG_ENTRIES: deque[dict[str, Any]] = deque(maxlen=1000)
+LOG_LOCK = threading.Lock()
 
 DEFAULTS: dict[str, Any] = {
     "port": 8000,
@@ -127,6 +135,7 @@ class AnalyticsRequest(BaseModel):
 async def add_request_headers(request, call_next):
     started = time.perf_counter()
     request_id = str(uuid.uuid4())
+    REQUEST_COUNTER.inc()
     try:
         response = await call_next(request)
     except Exception:
@@ -134,6 +143,17 @@ async def add_request_headers(request, call_next):
         response = JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Process-Time"] = f"{max(0.0, time.perf_counter() - started):.6f}"
+    log_entry = {
+        "level": "info",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "path": request.url.path,
+        "request_id": request_id,
+        "method": request.method,
+        "status_code": response.status_code,
+    }
+    with LOG_LOCK:
+        LOG_ENTRIES.append(log_entry)
+    print(json.dumps(log_entry, separators=(",", ":")), flush=True)
     return response
 
 
@@ -205,9 +225,26 @@ async def read_counter(key: str) -> dict[str, Any]:
 
 
 @app.get("/healthz")
-async def health_check() -> dict[str, str]:
-    await redis_client.ping()
-    return {"status": "ok", "redis": "up"}
+async def health_check() -> dict[str, Any]:
+    return {"status": "ok", "uptime_s": max(0.0, time.monotonic() - STARTED_AT)}
+
+
+@app.get("/work")
+def do_work(n: int = Query(..., ge=0)) -> dict[str, Any]:
+    for value in range(n):
+        _ = value * value
+    return {"email": USER_EMAIL, "done": n}
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/logs/tail")
+def logs_tail(limit: int = Query(default=50, ge=0, le=1000)) -> list[dict[str, Any]]:
+    with LOG_LOCK:
+        return list(LOG_ENTRIES)[-limit:] if limit else []
 
 
 @app.post("/analytics")

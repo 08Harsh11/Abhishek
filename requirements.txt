@@ -4,3 +4,4 @@ python-dotenv
 PyYAML
 PyJWT[crypto]
 redis>=5,<7
+prometheus-client>=0.20,<1
