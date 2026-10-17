@@ -4,13 +4,26 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import jwt
 import yaml
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from fastapi.responses import JSONResponse
 
 
 BASE_DIR = Path(__file__).resolve().parent
+JWT_ISSUER = "https://idp.exam.local"
+JWT_AUDIENCE = "tds-37pgyvl7.apps.exam.local"
+JWT_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2okOHspNjgA+2rTLbeuY
+cxiP/hG8C6Sb9iwg3yiLAA4HCnpITcbWCSelbvbYGuc3EbNy4xFyf5Cbj5DHJMID
+EkryOgyd2giIIIBOUBj8S63uGcnRpOBh9NFatfNwheKuzsPuVNldu6A9cNteNpXc
+WyJjG2axVfmq7i6SuKr1JoWYG7xTTAvKPujSl4OtsQfO3h5NepzdfXpr28oNnzfW
+ed+zclR6BcmNNo/WVfJ4xyCLSf0BCOgdTgW6PdaChd1l9VDetJZVEgC5tkyvXsfI
+SI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX
+dQIDAQAB
+-----END PUBLIC KEY-----"""
 
 DEFAULTS: dict[str, Any] = {
     "port": 8000,
@@ -86,6 +99,10 @@ app.add_middleware(
 )
 
 
+class VerifyRequest(BaseModel):
+    token: str
+
+
 @app.middleware("http")
 async def add_request_headers(request, call_next):
     started = time.perf_counter()
@@ -123,3 +140,33 @@ def get_stats(values: str = Query(...)) -> dict[str, Any]:
         "max": max(numbers),
         "mean": total / count,
     }
+
+
+@app.post("/verify")
+def verify_token(body: VerifyRequest) -> JSONResponse:
+    try:
+        claims = jwt.decode(
+            body.token,
+            JWT_PUBLIC_KEY,
+            algorithms=["RS256"],
+            issuer=JWT_ISSUER,
+            options={"verify_aud": False, "require": ["iss", "aud", "exp"]},
+        )
+        if not isinstance(claims, dict):
+            raise jwt.InvalidTokenError("JWT payload must be an object")
+        if claims["aud"] != JWT_AUDIENCE:
+            raise jwt.InvalidTokenError("audience mismatch")
+        if not isinstance(claims.get("email"), str) or not isinstance(claims.get("sub"), str):
+            raise jwt.InvalidTokenError("required identity claims are missing")
+    except (jwt.InvalidTokenError, TypeError, KeyError, AttributeError):
+        return JSONResponse(status_code=401, content={"valid": False})
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "valid": True,
+            "email": claims["email"],
+            "sub": claims["sub"],
+            "aud": claims["aud"],
+        },
+    )
