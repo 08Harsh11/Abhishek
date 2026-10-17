@@ -3,3 +3,4 @@ uvicorn[standard]
 python-dotenv
 PyYAML
 PyJWT[crypto]
+redis>=5,<7

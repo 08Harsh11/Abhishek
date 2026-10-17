@@ -1,12 +1,15 @@
 import os
+import secrets
 import time
 import uuid
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import jwt
+import redis.asyncio as redis
 import yaml
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
@@ -24,6 +27,10 @@ ed+zclR6BcmNNo/WVfJ4xyCLSf0BCOgdTgW6PdaChd1l9VDetJZVEgC5tkyvXsfI
 SI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX
 dQIDAQAB
 -----END PUBLIC KEY-----"""
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+ANALYTICS_API_KEY = os.getenv("ANALYTICS_API_KEY", "")
+USER_EMAIL = "24f3002908@ds.study.iitm.ac.in"
 
 DEFAULTS: dict[str, Any] = {
     "port": 8000,
@@ -97,13 +104,23 @@ app.add_middleware(
         "https://dash-cooukr.example.com",
         "https://exam.sanand.workers.dev",
     ],
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
 
 class VerifyRequest(BaseModel):
     token: str
+
+
+class AnalyticsEvent(BaseModel):
+    user: str
+    amount: float
+    ts: int
+
+
+class AnalyticsRequest(BaseModel):
+    events: list[AnalyticsEvent]
 
 
 @app.middleware("http")
@@ -173,3 +190,46 @@ def verify_token(body: VerifyRequest) -> JSONResponse:
             "aud": claims["aud"],
         },
     )
+
+
+@app.post("/hit/{key}")
+async def hit_counter(key: str) -> dict[str, Any]:
+    count = await redis_client.incr(key)
+    return {"key": key, "count": count}
+
+
+@app.get("/count/{key}")
+async def read_counter(key: str) -> dict[str, Any]:
+    value = await redis_client.get(key)
+    return {"key": key, "count": int(value) if value is not None else 0}
+
+
+@app.get("/healthz")
+async def health_check() -> dict[str, str]:
+    await redis_client.ping()
+    return {"status": "ok", "redis": "up"}
+
+
+@app.post("/analytics")
+def analytics(
+    body: AnalyticsRequest,
+    api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict[str, Any]:
+    if not secrets.compare_digest(api_key or "", ANALYTICS_API_KEY):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    user_totals: dict[str, float] = defaultdict(float)
+    revenue = 0.0
+    for event in body.events:
+        if event.amount > 0:
+            revenue += event.amount
+            user_totals[event.user] += event.amount
+
+    top_user = max(user_totals, key=user_totals.get) if user_totals else None
+    return {
+        "email": USER_EMAIL,
+        "total_events": len(body.events),
+        "unique_users": len({event.user for event in body.events}),
+        "revenue": revenue,
+        "top_user": top_user,
+    }
